@@ -1,0 +1,642 @@
+
+1 - Interceptor
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.stereotype.Component;
+import org.springframework.web.servlet.HandlerInterceptor;
+import org.springframework.web.servlet.ModelAndView;
+import org.springframework.web.method.HandlerMethod;
+import org.springframework.web.util.ContentCachingRequestWrapper;
+import org.springframework.web.util.ContentCachingResponseWrapper;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.time.LocalDateTime;
+import java.util.Enumeration;
+import java.util.HashMap;
+import java.util.Map;
+
+@Component
+public class DashboardInterceptor implements HandlerInterceptor {
+
+    //private final MessagePublisherPort messagePublisher;
+    private final SqsPublisher sqsPublisher;
+    private final MonitoredEndpointRegistry endpointRegistry;
+    private final ObjectMapper objectMapper;
+
+    public DashboardInterceptor(SqsPublisher sqsPublisher, MonitoredEndpointRegistry endpointRegistry, ObjectMapper objectMapper) {
+        this.sqsPublisher = sqsPublisher;
+        this.endpointRegistry = endpointRegistry;
+        this.objectMapper = objectMapper;
+    }
+
+    @Override
+    public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
+        if (!(handler instanceof HandlerMethod)) {
+            return true;
+        }
+
+        // Substitui os wrappers para capturar os dados da requisição e resposta
+        if (!(request instanceof ContentCachingRequestWrapper)) {
+            request = new ContentCachingRequestWrapper(request);
+        }
+        if (!(response instanceof ContentCachingResponseWrapper)) {
+            response = new ContentCachingResponseWrapper(response);
+        }
+
+        return true;
+    }
+
+    @Override
+    public void afterCompletion(HttpServletRequest request, HttpServletResponse response, Object handler, Exception ex) throws Exception {
+        if (!(handler instanceof HandlerMethod handlerMethod)) {
+            return;
+        }
+
+        String controllerName = handlerMethod.getBeanType().getSimpleName();
+        if (!endpointRegistry.isMonitored(controllerName)) {
+            return;
+        }
+
+        // Captura os headers
+        Map<String, String> headers = new HashMap<>();
+        Enumeration<String> headerNames = request.getHeaderNames();
+        while (headerNames.hasMoreElements()) {
+            String headerName = headerNames.nextElement();
+            headers.put(headerName, request.getHeader(headerName));
+        }
+
+        // Captura o corpo da requisição
+        String requestBody = getRequestBody(request);
+
+        // Captura o corpo da resposta
+        String responseBody = getResponseBody(response);
+
+        // Cria o objeto de dados do dashboard
+        DashboardData dashboardData = new DashboardData(request.getRequestURI(), LocalDateTime.now(), headers, requestBody, responseBody);
+        String payload = objectMapper.writeValueAsString(dashboardData);
+
+        // Envia para o SQS
+        //DashboardMessage message = new DashboardMessage("DOCS-" + System.currentTimeMillis(), request.getRequestURI(), payload);
+        DashboardMessage message = DashboardMessage.fromDashboardData(dashboardData);
+        sqsPublisher.publish(message);
+    }
+
+    private String getRequestBody(HttpServletRequest request) {
+        if (request instanceof ContentCachingRequestWrapper cachingRequest) {
+            byte[] content = cachingRequest.getContentAsByteArray();
+            return content.length > 0 ? new String(content, StandardCharsets.UTF_8) : "";
+        }
+        return "";
+    }
+
+    private String getResponseBody(HttpServletResponse response) throws IOException {
+        if (response instanceof ContentCachingResponseWrapper cachingResponse) {
+            byte[] content = cachingResponse.getContentAsByteArray();
+            String responseBody = content.length > 0 ? new String(content, StandardCharsets.UTF_8) : "";
+            cachingResponse.copyBodyToResponse(); // Importante para devolver o conteúdo ao cliente
+            return responseBody;
+        }
+        return "";
+    }
+}
+
+
+2 - registrar interceptor
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
+import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
+
+@Configuration
+public class InterceptorConfig implements WebMvcConfigurer {
+
+    private final DashboardInterceptor dashboardInterceptor;
+
+    @Autowired
+    public InterceptorConfig(DashboardInterceptor dashboardInterceptor) {
+        this.dashboardInterceptor = dashboardInterceptor;
+    }
+
+    @Override
+    public void addInterceptors(InterceptorRegistry registry) {
+        registry.addInterceptor(dashboardInterceptor);
+    }
+}
+
+
+3 - Produtor SQS para envio das mensagens
+
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+import software.amazon.awssdk.services.sqs.SqsClient;
+import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
+
+@Service
+public class SqsPublisher {
+
+    private final SqsClient sqsClient;
+
+    @Value("${aws.sqs.queue-url}")
+    private String queueUrl;
+
+    public SqsPublisher(SqsClient sqsClient) {
+        this.sqsClient = sqsClient;
+    }
+
+    public void publish(DashboardMessage message) {
+        SendMessageRequest sendMsgRequest = SendMessageRequest.builder()
+            .queueUrl(queueUrl)
+            .messageBody(message.toJson()) // Método toJson() deve serializar para JSON
+            .build();
+
+        sqsClient.sendMessage(sendMsgRequest);
+    }
+}
+
+4 - Configuração AWS SQS no application.yml
+
+aws:
+  sqs:
+    queue:
+      name: "minha-fila"
+      url: "https://sqs.us-east-1.amazonaws.com/123456789012/minha-fila"
+    region: "us-east-1"
+    access-key: "SEU_ACCESS_KEY"
+    secret-key: "SEU_SECRET_KEY"
+    max-messages: 10
+    visibility-timeout: 30
+    wait-time-seconds: 20
+
+
+5 - Modelos DashboardData e DashboardMessage
+
+import java.time.LocalDateTime;
+import java.util.Map;
+
+public class DashboardData {
+    private String url;
+    private LocalDateTime timestamp;
+    private Map<String, String> headers;
+    private String requestBody;
+    private String responseBody;
+
+    public DashboardData(String url, LocalDateTime timestamp, Map<String, String> headers, String requestBody, String responseBody) {
+        this.url = url;
+        this.timestamp = timestamp;
+        this.headers = headers;
+        this.requestBody = requestBody;
+        this.responseBody = responseBody;
+    }
+
+    // Getters e toString()
+}
+
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+public class DashboardMessage {
+    private String id;
+    private String url;
+    private String payload;
+
+    public DashboardMessage(String id, String url, String payload) {
+        this.id = id;
+        this.url = url;
+        this.payload = payload;
+    }
+
+    public static DashboardMessage fromDashboardData(DashboardData data) {
+        try {
+            String payloadJson = new ObjectMapper().writeValueAsString(data);
+            return new DashboardMessage("DOCS-" + System.currentTimeMillis(), data.getUrl(), payloadJson);
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException("Erro ao converter DashboardData para JSON", e);
+        }
+    }
+
+    public String toJson() {
+        try {
+            return new ObjectMapper().writeValueAsString(this);
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException("Erro ao converter DashboardMessage para JSON", e);
+        }
+    }
+
+    // Getters e toString()
+}
+
+6 - Anotação @MonitoredEndpoint
+
+import java.lang.annotation.ElementType;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
+
+@Target(ElementType.TYPE) // Aplica-se a classes (Controllers)
+@Retention(RetentionPolicy.RUNTIME) // Disponível em tempo de execução
+public @interface MonitoredEndpoint {
+}
+
+
+7 - MonitoredEndpointRegistry
+    Esta classe registrará automaticamente todos os endpoints anotados com @MonitoredEndpoint.
+
+import org.springframework.context.ApplicationContext;
+import org.springframework.stereotype.Component;
+import java.util.HashSet;
+import java.util.Set;
+
+@Component
+public class MonitoredEndpointRegistry {
+
+    private final Set<String> monitoredEndpoints = new HashSet<>();
+
+    public MonitoredEndpointRegistry(ApplicationContext applicationContext) {
+        applicationContext.getBeansWithAnnotation(MonitoredEndpoint.class)
+            .values()
+            .forEach(bean -> monitoredEndpoints.add(bean.getClass().getSimpleName()));
+    }
+
+    public boolean isMonitored(String controllerName) {
+        return monitoredEndpoints.contains(controllerName);
+    }
+}
+
+
+Como os módulos se comunicam?
+1 - O Interceptor (DashboardInterceptor) fica no módulo application e captura os dados das requisições.
+
+2 - Ele chama a porta (MessagePublisherPort) do domínio, garantindo que a aplicação não dependa diretamente do SQS.
+
+3 - O módulo infrastructure contém a implementação concreta (SqsPublisherAdapter), que envia os dados para a AWS SQS.
+
+
+
+
+1
+
+package com.seuprojeto.application.interceptor;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.seuprojeto.domain.model.DashboardData;
+import com.seuprojeto.domain.model.DashboardMessage;
+import com.seuprojeto.domain.port.MessagePublisherPort;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.stereotype.Component;
+import org.springframework.web.servlet.HandlerInterceptor;
+import org.springframework.web.method.HandlerMethod;
+import org.springframework.web.util.ContentCachingRequestWrapper;
+import org.springframework.web.util.ContentCachingResponseWrapper;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.time.LocalDateTime;
+import java.util.Enumeration;
+import java.util.HashMap;
+import java.util.Map;
+
+@Component
+public class DashboardInterceptor implements HandlerInterceptor {
+
+    private final MessagePublisherPort messagePublisher;
+    private final ObjectMapper objectMapper;
+
+    public DashboardInterceptor(MessagePublisherPort messagePublisher, ObjectMapper objectMapper) {
+        this.messagePublisher = messagePublisher;
+        this.objectMapper = objectMapper;
+    }
+
+    @Override
+    public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) {
+        if (!(handler instanceof HandlerMethod)) {
+            return true;
+        }
+        return true;
+    }
+
+    @Override
+    public void afterCompletion(HttpServletRequest request, HttpServletResponse response, Object handler, Exception ex) throws Exception {
+        if (!(handler instanceof HandlerMethod)) {
+            return;
+        }
+
+        Map<String, String> headers = new HashMap<>();
+        Enumeration<String> headerNames = request.getHeaderNames();
+        while (headerNames.hasMoreElements()) {
+            String headerName = headerNames.nextElement();
+            headers.put(headerName, request.getHeader(headerName));
+        }
+
+        String requestBody = getRequestBody(request);
+        String responseBody = getResponseBody(response);
+
+        DashboardData dashboardData = new DashboardData(request.getRequestURI(), LocalDateTime.now(), headers, requestBody, responseBody);
+        DashboardMessage message = DashboardMessage.fromDashboardData(dashboardData);
+
+        messagePublisher.publish(message);
+    }
+
+    private String getRequestBody(HttpServletRequest request) {
+        if (request instanceof ContentCachingRequestWrapper cachingRequest) {
+            byte[] content = cachingRequest.getContentAsByteArray();
+            return content.length > 0 ? new String(content, StandardCharsets.UTF_8) : "";
+        }
+        return "";
+    }
+
+    private String getResponseBody(HttpServletResponse response) throws IOException {
+        if (response instanceof ContentCachingResponseWrapper cachingResponse) {
+            byte[] content = cachingResponse.getContentAsByteArray();
+            String responseBody = content.length > 0 ? new String(content, StandardCharsets.UTF_8) : "";
+            cachingResponse.copyBodyToResponse();
+            return responseBody;
+        }
+        return "";
+    }
+}
+
+
+
+2
+
+
+package com.seuprojeto.domain.port;
+
+import com.seuprojeto.domain.model.DashboardMessage;
+
+public interface MessagePublisherPort {
+    void publish(DashboardMessage message);
+}
+
+
+3 - Criamos o adapter (SqsPublisherAdapter) que implementa a porta
+
+package com.seuprojeto.infrastructure.adapter;
+
+import com.seuprojeto.domain.model.DashboardMessage;
+import com.seuprojeto.domain.port.MessagePublisherPort;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+import software.amazon.awssdk.services.sqs.SqsClient;
+import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
+
+@Service
+public class SqsPublisherAdapter implements MessagePublisherPort {
+
+    private final SqsClient sqsClient;
+
+    @Value("${aws.sqs.queue-url}")
+    private String queueUrl;
+
+    public SqsPublisherAdapter(SqsClient sqsClient) {
+        this.sqsClient = sqsClient;
+    }
+
+    @Override
+    public void publish(DashboardMessage message) {
+        SendMessageRequest sendMsgRequest = SendMessageRequest.builder()
+            .queueUrl(queueUrl)
+            .messageBody(message.toJson())
+            .build();
+
+        sqsClient.sendMessage(sendMsgRequest);
+    }
+}
+
+4. Configuramos a injeção da porta no interceptor
+
+@Configuration
+public class InterceptorConfig implements WebMvcConfigurer {
+
+    private final DashboardInterceptor dashboardInterceptor;
+
+    @Autowired
+    public InterceptorConfig(DashboardInterceptor dashboardInterceptor) {
+        this.dashboardInterceptor = dashboardInterceptor;
+    }
+
+    @Override
+    public void addInterceptors(InterceptorRegistry registry) {
+        registry.addInterceptor(dashboardInterceptor);
+    }
+}
+
+
+
+Resumo
+
+application → Contém lógica de aplicação (interceptor, config, etc.).
+
+domain → Contém modelos e contratos (MessagePublisherPort).
+
+infrastructure → Implementa adaptadores (SqsPublisherAdapter).
+
+
+
+-------------------------------------------------------------------------------
+ajusta codigos com este - incluido as portas
+
+com.seuprojeto
+│
+├── application
+│   ├── config
+│   │   ├── InterceptorConfig.java
+│   │
+│   ├── interceptor
+│   │   ├── DashboardInterceptor.java
+│
+│   ├── annotation
+│   │   ├── MonitoredEndpoint.java
+│
+│   ├── registry
+│   │   ├── MonitoredEndpointRegistry.java
+│
+├── domain
+│   ├── model
+│   │   ├── DashboardData.java
+│   │   ├── DashboardMessage.java
+│   │
+│   ├── port
+│   │   ├── MessagePublisherPort.java  // Interface que define o contrato de publicação
+│
+├── infrastructure
+│   ├── adapter
+│   │   ├── SqsPublisherAdapter.java   // Implementação da interface MessagePublisherPort
+│   │
+│   ├── config
+│   │   ├── application.yml
+│
+└── main
+    ├── SeuprojetoApplication.java
+
+
+
+package com.seuprojeto.application.config;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
+import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
+
+@Configuration
+public class InterceptorConfig implements WebMvcConfigurer {
+
+    private final DashboardInterceptor dashboardInterceptor;
+
+    @Autowired
+    public InterceptorConfig(DashboardInterceptor dashboardInterceptor) {
+        this.dashboardInterceptor = dashboardInterceptor;
+    }
+
+    @Override
+    public void addInterceptors(InterceptorRegistry registry) {
+        registry.addInterceptor(dashboardInterceptor);
+    }
+}
+
+package com.seuprojeto.application.interceptor;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.seuprojeto.domain.model.DashboardData;
+import com.seuprojeto.domain.model.DashboardMessage;
+import com.seuprojeto.application.registry.MonitoredEndpointRegistry;
+import com.seuprojeto.domain.port.MessagePublisherPort;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.stereotype.Component;
+import org.springframework.web.servlet.HandlerInterceptor;
+import org.springframework.web.method.HandlerMethod;
+import org.springframework.web.util.ContentCachingRequestWrapper;
+import org.springframework.web.util.ContentCachingResponseWrapper;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.time.LocalDateTime;
+import java.util.Enumeration;
+import java.util.HashMap;
+import java.util.Map;
+
+@Component
+public class DashboardInterceptor implements HandlerInterceptor {
+
+    private final MessagePublisherPort messagePublisher;
+    private final MonitoredEndpointRegistry endpointRegistry;
+    private final ObjectMapper objectMapper;
+
+    public DashboardInterceptor(MessagePublisherPort messagePublisher, MonitoredEndpointRegistry endpointRegistry, ObjectMapper objectMapper) {
+        this.messagePublisher = messagePublisher;
+        this.endpointRegistry = endpointRegistry;
+        this.objectMapper = objectMapper;
+    }
+
+    @Override
+    public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
+        if (!(handler instanceof HandlerMethod)) {
+            return true;
+        }
+
+        if (!(request instanceof ContentCachingRequestWrapper)) {
+            request = new ContentCachingRequestWrapper(request);
+        }
+        if (!(response instanceof ContentCachingResponseWrapper)) {
+            response = new ContentCachingResponseWrapper(response);
+        }
+
+        return true;
+    }
+
+    @Override
+    public void afterCompletion(HttpServletRequest request, HttpServletResponse response, Object handler, Exception ex) throws Exception {
+        if (!(handler instanceof HandlerMethod handlerMethod)) {
+            return;
+        }
+
+        String controllerName = handlerMethod.getBeanType().getSimpleName();
+        if (!endpointRegistry.isMonitored(controllerName)) {
+            return;
+        }
+
+        Map<String, String> headers = new HashMap<>();
+        Enumeration<String> headerNames = request.getHeaderNames();
+        while (headerNames.hasMoreElements()) {
+            String headerName = headerNames.nextElement();
+            headers.put(headerName, request.getHeader(headerName));
+        }
+
+        String requestBody = getRequestBody(request);
+        String responseBody = getResponseBody(response);
+
+        DashboardData dashboardData = new DashboardData(request.getRequestURI(), LocalDateTime.now(), headers, requestBody, responseBody);
+        String payload = objectMapper.writeValueAsString(dashboardData);
+
+        DashboardMessage message = DashboardMessage.fromDashboardData(dashboardData);
+        messagePublisher.publish(message);
+    }
+
+    private String getRequestBody(HttpServletRequest request) {
+        if (request instanceof ContentCachingRequestWrapper cachingRequest) {
+            byte[] content = cachingRequest.getContentAsByteArray();
+            return content.length > 0 ? new String(content, StandardCharsets.UTF_8) : "";
+        }
+        return "";
+    }
+
+    private String getResponseBody(HttpServletResponse response) throws IOException {
+        if (response instanceof ContentCachingResponseWrapper cachingResponse) {
+            byte[] content = cachingResponse.getContentAsByteArray();
+            String responseBody = content.length > 0 ? new String(content, StandardCharsets.UTF_8) : "";
+            cachingResponse.copyBodyToResponse();
+            return responseBody;
+        }
+        return "";
+    }
+}
+
+package com.seuprojeto.domain.port;
+
+import com.seuprojeto.domain.model.DashboardMessage;
+
+public interface MessagePublisherPort {
+    void publish(DashboardMessage message);
+}
+
+package com.seuprojeto.infrastructure.adapter;
+
+import com.seuprojeto.domain.model.DashboardMessage;
+import com.seuprojeto.domain.port.MessagePublisherPort;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+import software.amazon.awssdk.services.sqs.SqsClient;
+import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
+
+@Service
+public class SqsPublisherAdapter implements MessagePublisherPort {
+
+    private final SqsClient sqsClient;
+
+    @Value("${aws.sqs.queue-url}")
+    private String queueUrl;
+
+    public SqsPublisherAdapter(SqsClient sqsClient) {
+        this.sqsClient = sqsClient;
+    }
+
+    @Override
+    public void publish(DashboardMessage message) {
+        SendMessageRequest sendMsgRequest = SendMessageRequest.builder()
+            .queueUrl(queueUrl)
+            .messageBody(message.toJson())
+            .build();
+
+        sqsClient.sendMessage(sendMsgRequest);
+    }
+}
+
+
+

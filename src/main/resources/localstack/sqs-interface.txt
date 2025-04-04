@@ -1,0 +1,258 @@
+
+
+1 - interceptor
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.stereotype.Component;
+import org.springframework.web.servlet.HandlerInterceptor;
+
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.time.LocalDateTime;
+import java.util.Enumeration;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.stream.Collectors;
+
+
+@Component
+public class DashboardInterceptor implements HandlerInterceptor {
+
+    private final DashboardPublisher dashboardPublisher;
+    private final ObjectMapper objectMapper;
+    private final DashboardMapperFactory mapperFactory;
+
+    public DashboardInterceptor(DashboardPublisher dashboardPublisher, ObjectMapper objectMapper, DashboardMapperFactory mapperFactory) {
+        this.dashboardPublisher = dashboardPublisher;
+        this.objectMapper = objectMapper;
+        this.mapperFactory = mapperFactory;
+    }
+
+    @Override
+    public void afterCompletion(HttpServletRequest request, HttpServletResponse response, Object handler, Exception ex) throws Exception {
+        String url = request.getRequestURI();
+        DashboardMapper mapper = mapperFactory.getMapper(url);
+        if (mapper == null) {
+            return;
+        }
+
+        // Capturar headers da requisição
+        Map<String, String> requestHeaders = new HashMap<>();
+        Enumeration<String> headerNames = request.getHeaderNames();
+        while (headerNames.hasMoreElements()) {
+            String headerName = headerNames.nextElement();
+            requestHeaders.put(headerName, request.getHeader(headerName));
+        }
+
+        // Capturar corpo da requisição (caso tenha sido salvo previamente)
+        String requestBody = (String) request.getAttribute("requestBody");
+
+        // Capturar corpo da resposta
+        String responseBody = getResponseBody(response);
+
+        // Criar DashboardData
+        DashboardData dashboardData = new DashboardData(
+                url,
+                LocalDateTime.now(),
+                requestBody,
+                responseBody,
+                requestHeaders
+        );
+
+        // Mapear e enviar mensagem
+        DashboardMessage message = mapper.map(dashboardData);
+        dashboardPublisher.publish(message);
+    }
+
+    private String getResponseBody(HttpServletResponse response) {
+        try {
+            BufferedReader reader = new BufferedReader(new InputStreamReader(response.getInputStream()));
+            return reader.lines().collect(Collectors.joining(System.lineSeparator()));
+        } catch (Exception e) {
+            return "Erro ao capturar resposta";
+        }
+    }
+}
+
+
+
+2 - registrar interceptor
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
+import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
+
+@Configuration
+public class DashboardInterceptorConfig implements WebMvcConfigurer {
+
+    private final DashboardInterceptor dashboardInterceptor;
+
+    @Autowired
+    public DashboardInterceptorConfig(DashboardInterceptor dashboardInterceptor) {
+        this.dashboardInterceptor = dashboardInterceptor;
+    }
+
+    @Override
+    public void addInterceptors(InterceptorRegistry registry) {
+        registry.addInterceptor(dashboardInterceptor);
+    }
+}
+
+
+3 - Produtor SQS para envio das mensagens
+
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.jms.core.JmsTemplate;
+import org.springframework.stereotype.Service;
+
+@Service
+public class DashboardPublisher {
+
+    private final JmsTemplate jmsTemplate;
+    private final String queueName;
+
+    public DashboardPublisher(JmsTemplate jmsTemplate, @Value("${aws.sqs.queue-name}") String queueName) {
+        this.jmsTemplate = jmsTemplate;
+        this.queueName = queueName;
+    }
+
+    public void publish(DashboardMessage message) {
+        jmsTemplate.convertAndSend(queueName, message);
+    }
+}
+
+
+4 - Iterface mapper para as classes que serao mapeadas
+
+public interface DashboardMapper {
+    DashboardMessage map(DashboardData data);
+}
+
+5 - Fabrica de mappers ( vai descobrir quem sao as classes que serao enviadas para sqs )
+
+import org.springframework.context.ApplicationContext;
+import org.springframework.stereotype.Component;
+import java.util.HashMap;
+import java.util.Map;
+
+@Component
+public class DashboardMapperFactory {
+
+    private final Map<String, DashboardMapper> mappers = new HashMap<>();
+
+    public DashboardMapperFactory(ApplicationContext applicationContext) {
+        // Obtém todas as implementações da interface DashboardMapper
+        Map<String, DashboardMapper> beans = applicationContext.getBeansOfType(DashboardMapper.class);
+
+        // Associa cada mapper a uma URL baseada em convenção (exemplo: /api/[nome])
+        for (DashboardMapper mapper : beans.values()) {
+            String url = "/api/" + mapper.getClass().getSimpleName().replace("DashboardMapper", "").toLowerCase();
+            mappers.put(url, mapper);
+        }
+    }
+
+    public DashboardMapper getMapper(String url) {
+        return mappers.get(url);
+    }
+}
+
+
+6 - Modelos DashboardData e DashboardMessage
+
+import java.time.LocalDateTime;
+import java.util.Map;
+
+public class DashboardData {
+    private String url;
+    private LocalDateTime timestamp;
+    private String requestBody;
+    private String responseBody;
+    private Map<String, String> headers;
+
+    public DashboardData(String url, LocalDateTime timestamp, String requestBody, String responseBody, Map<String, String> headers) {
+        this.url = url;
+        this.timestamp = timestamp;
+        this.requestBody = requestBody;
+        this.responseBody = responseBody;
+        this.headers = headers;
+    }
+
+    // Getters e Setters
+}
+
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+public class DashboardMessage {
+    private String id;
+    private String url;
+    private String requestBody;
+    private String responseBody;
+
+    public DashboardMessage(String id, String url, String requestBody, String responseBody) {
+        this.id = id;
+        this.url = url;
+        this.requestBody = requestBody;
+        this.responseBody = responseBody;
+    }
+
+    public static DashboardMessage fromDashboardData(DashboardData data) {
+        return new DashboardMessage(
+                "MSG-" + System.currentTimeMillis(),
+                data.getUrl(),
+                data.getRequestBody(),
+                data.getResponseBody()
+        );
+    }
+
+    public String toJson() {
+        try {
+            return new ObjectMapper().writeValueAsString(this);
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException("Erro ao converter DashboardMessage para JSON", e);
+        }
+    }
+
+    // Getters e Setters
+}
+
+
+
+7 - application.yml
+aws:
+  sqs:
+    queue-name: my-dashboard-queue
+  region: us-east-1
+  access-key: YOUR_ACCESS_KEY
+  secret-key: YOUR_SECRET_KEY
+
+
+
+8 - exemplo
+
+@Component
+public class UserDashboardMapper implements DashboardMapper {
+    @Override
+    public DashboardMessage map(DashboardData data) {
+        return new DashboardMessage("user-event", data.getUrl(), data.getBody());
+    }
+}
+
+@Component
+public class OrderDashboardMapper implements DashboardMapper {
+    @Override
+    public DashboardMessage map(DashboardData data) {
+        return new DashboardMessage("order-event", data.getUrl(), data.getBody());
+    }
+}
+
+
+
+
+
+
+
