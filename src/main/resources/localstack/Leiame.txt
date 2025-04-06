@@ -673,3 +673,138 @@ public class AwsSqsConfig {
 
 
 
+package com.seuprojeto.infrastructure.config;
+
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.sqs.SqsClient;
+import software.amazon.awssdk.services.sqs.SqsClientBuilder;
+
+import java.net.URI;
+
+@Configuration
+public class AwsSqsConfig {
+
+    private final AwsProperties awsProperties;
+
+    public AwsSqsConfig(AwsProperties awsProperties) {
+        this.awsProperties = awsProperties;
+    }
+
+    @Bean
+    public SqsClient sqsClient() {
+        SqsClientBuilder builder = SqsClient.builder()
+                .region(Region.of(awsProperties.getSqs().getRegion()))
+                .credentialsProvider(DefaultCredentialsProvider.create());
+
+        String endpoint = awsProperties.getSqs().getEndpoint();
+        if (endpoint != null && !endpoint.isBlank()) {
+            builder.endpointOverride(URI.create(endpoint));
+        }
+
+        return builder.build();
+    }
+}
+
+
+
+ajuste
+
+cloud:
+  aws:
+    sqs:
+      region: sa-east-1
+      endpoint: https://sqs.sa-east-1.amazonaws.com
+    queues:
+      metrics-sqs-tailor: metricas-tailor
+
+
+
+package com.seuprojeto.infrastructure.adapter;
+
+import com.seuprojeto.domain.model.DashboardMessage;
+import com.seuprojeto.domain.port.MessagePublisherPort;
+import com.seuprojeto.infrastructure.config.AwsProperties;
+import org.springframework.stereotype.Service;
+import software.amazon.awssdk.services.sqs.SqsClient;
+import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
+
+@Service
+public class SqsPublisherAdapter implements MessagePublisherPort {
+
+    private final SqsClient sqsClient;
+    private final String queueUrl;
+
+    public SqsPublisherAdapter(SqsClient sqsClient, AwsProperties awsProperties) {
+        this.sqsClient = sqsClient;
+        this.queueUrl = awsProperties.getQueues().get("metrics-sqs-tailor");
+    }
+
+    @Override
+    public void publish(DashboardMessage message) {
+        SendMessageRequest sendMsgRequest = SendMessageRequest.builder()
+            .queueUrl(queueUrl)
+            .messageBody(message.toJson())
+            .build();
+
+        sqsClient.sendMessage(sendMsgRequest);
+    }
+}
+
+
+package com.seuprojeto.infrastructure.config;
+
+import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.context.annotation.Configuration;
+
+import java.util.Map;
+
+@Configuration
+@ConfigurationProperties(prefix = "cloud.aws")
+public class AwsProperties {
+
+    private Sqs sqs;
+    private Map<String, String> awsQueues;
+
+    public static class Sqs {
+        private String region;
+        private String endpoint;
+
+        public String getRegion() {
+            return region;
+        }
+
+        public void setRegion(String region) {
+            this.region = region;
+        }
+
+        public String getEndpoint() {
+            return endpoint;
+        }
+
+        public void setEndpoint(String endpoint) {
+            this.endpoint = endpoint;
+        }
+    }
+
+    public Sqs getSqs() {
+        return sqs;
+    }
+
+    public void setSqs(Sqs sqs) {
+        this.sqs = sqs;
+    }
+
+    public Map<String, String> getAwsQueues() {
+        return awsQueues;
+    }
+
+    public void setAwsQueues(Map<String, String> awsQueues) {
+        this.awsQueues = awsQueues;
+    }
+}
+
+
+
