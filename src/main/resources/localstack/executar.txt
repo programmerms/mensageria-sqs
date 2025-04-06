@@ -1,0 +1,49 @@
+1  - docker-compose.yml com LocalStack e SQS
+version: "3.8"
+
+services:
+  localstack:
+    image: localstack/localstack:latest
+    container_name: localstack_sqs
+    ports:
+      - "4566:4566" # Porta única para todos os serviços (incluindo SQS)
+    environment:
+      - SERVICES=sqs
+      - DEBUG=1
+      - DOCKER_HOST=unix:///var/run/docker.sock
+    volumes:
+      - "./.localstack:/var/lib/localstack"
+      - "/var/run/docker.sock:/var/run/docker.sock"
+      - "./init-scripts:/etc/localstack/init/ready.d"
+
+
+2 - Crie a pasta init-scripts/ com um script chamado 01-create-queues.sh para criar a fila automaticamente.
+init-scripts/01-create-queues.sh
+
+#!/bin/bash
+
+awslocal sqs create-queue --queue-name metricas-tailor
+
+3 - application-local.yml (ou application.yml para testes locais)
+cloud:
+  aws:
+    sqs:
+      region: sa-east-1
+      endpoint: http://localhost:4566
+    aws-queues:
+      metrics-sqs-tailor: http://localhost:4566/000000000000/metricas-tailor
+
+4 - Como usar a anotação @MonitoredEndpoint no seu controller
+
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@MonitoredEndpoint
+@RestController
+public class MyTestController {
+
+    @GetMapping("/test")
+    public String test() {
+        return "Este endpoint está sendo monitorado!";
+    }
+}
