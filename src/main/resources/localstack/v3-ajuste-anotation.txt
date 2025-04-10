@@ -43,7 +43,7 @@ public @interface MonitoredEndpoint {
 ✅ ETAPA 2: Criar PayloadFilter para aplicar os filtros
 📦 Pacote sugerido: com.seuprojeto.application.util
 
-package com.seuprojeto.application.util;
+package com.seupacote.filtro;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -65,19 +65,40 @@ public class PayloadFilter {
 
         try {
             JsonNode root = objectMapper.readTree(json);
-            Map<String, Object> filtered = new LinkedHashMap<>();
+            Map<String, Object> result = new LinkedHashMap<>();
 
-            for (String field : allowedFields) {
-                JsonNode node = root.get(field);
-                if (node != null && !node.isNull()) {
-                    filtered.put(field, objectMapper.treeToValue(node, Object.class));
+            for (String path : allowedFields) {
+                JsonNode currentNode = root;
+                String[] parts = path.split("\\.");
+
+                for (String part : parts) {
+                    if (currentNode != null) {
+                        currentNode = currentNode.get(part);
+                    } else {
+                        break;
+                    }
+                }
+
+                if (currentNode != null && !currentNode.isNull()) {
+                    insertNested(result, parts, objectMapper.treeToValue(currentNode, Object.class));
                 }
             }
 
-            return filtered;
+            return result;
+
         } catch (Exception e) {
-            return Collections.emptyMap(); // ou logar se preferir
+            // log.error("Erro ao filtrar payload", e);
+            return Collections.emptyMap();
         }
+    }
+
+    @SuppressWarnings("unchecked")
+    private void insertNested(Map<String, Object> map, String[] path, Object value) {
+        Map<String, Object> current = map;
+        for (int i = 0; i < path.length - 1; i++) {
+            current = (Map<String, Object>) current.computeIfAbsent(path[i], k -> new LinkedHashMap<>());
+        }
+        current.put(path[path.length - 1], value);
     }
 }
 
