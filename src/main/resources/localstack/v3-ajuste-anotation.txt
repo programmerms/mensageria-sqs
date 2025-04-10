@@ -1,0 +1,456 @@
+ETAPA 1: Atualizar a anotação @MonitoredEndpoint
+📦 Pacote sugerido: com.seuprojeto.application.annotation
+
+package com.seuprojeto.application.annotation;
+
+import java.lang.annotation.*;
+
+/**
+ * Indica que a classe ou método deve ser monitorado e enviado ao Dashboard.
+ *
+ * <p>Se nenhum campo for informado, o corpo completo da requisição e resposta será enviado.</p>
+ *
+ * <p>Para limitar os dados enviados, informe quais propriedades do corpo devem ser incluídas usando os
+ * campos {@code includedRequestFields} e {@code includedResponseFields}.</p>
+ *
+ * <pre>
+ * Exemplos:
+ *   @MonitoredEndpoint
+ *   → Envia tudo.
+ *
+ *   @MonitoredEndpoint(includedRequestFields = {"email", "cpf"})
+ *   → Envia apenas os campos "email" e "cpf" do request.
+ * </pre>
+ */
+@Retention(RetentionPolicy.RUNTIME)
+@Target({ElementType.TYPE, ElementType.METHOD})
+public @interface MonitoredEndpoint {
+
+    /**
+     * Campos específicos do corpo da requisição que devem ser enviados.
+     * Se vazio, envia todo o corpo da requisição.
+     */
+    String[] includedRequestFields() default {};
+
+    /**
+     * Campos específicos do corpo da resposta que devem ser enviados.
+     * Se vazio, envia todo o corpo da resposta.
+     */
+    String[] includedResponseFields() default {};
+}
+
+
+✅ ETAPA 2: Criar PayloadFilter para aplicar os filtros
+📦 Pacote sugerido: com.seuprojeto.application.util
+
+package com.seuprojeto.application.util;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Component;
+
+import java.util.*;
+
+@Component
+@RequiredArgsConstructor
+public class PayloadFilter {
+
+    private final ObjectMapper objectMapper;
+
+    public Map<String, Object> filterPayload(String json, List<String> allowedFields) {
+        if (json == null || json.isEmpty() || allowedFields == null || allowedFields.isEmpty()) {
+            return Collections.emptyMap();
+        }
+
+        try {
+            JsonNode root = objectMapper.readTree(json);
+            Map<String, Object> filtered = new LinkedHashMap<>();
+
+            for (String field : allowedFields) {
+                JsonNode node = root.get(field);
+                if (node != null && !node.isNull()) {
+                    filtered.put(field, objectMapper.treeToValue(node, Object.class));
+                }
+            }
+
+            return filtered;
+        } catch (Exception e) {
+            return Collections.emptyMap(); // ou logar se preferir
+        }
+    }
+}
+
+
+ETAPA 3: Atualizar MonitoredEndpointRegistry
+📦 Pacote atual: com.seuprojeto.application.registry
+
+package com.seuprojeto.application.registry;
+
+import com.seuprojeto.application.annotation.MonitoredEndpoint;
+import jakarta.annotation.PostConstruct;
+import org.springframework.context.ApplicationContext;
+import org.springframework.stereotype.Component;
+import org.springframework.web.bind.annotation.RestController;
+
+import java.lang.reflect.Method;
+import java.util.*;
+
+@Component
+public class MonitoredEndpointRegistry {
+
+    private static final String METHOD_SEPARATOR = "#";
+
+    private final ApplicationContext applicationContext;
+    private final Set<String> monitoredEndpoints = new HashSet<>();
+    private final Map<String, MonitoredEndpoint> monitoredMethods = new HashMap<>();
+    private final Map<String, MonitoredEndpoint> monitoredClasses = new HashMap<>();
+
+    public MonitoredEndpointRegistry(ApplicationContext applicationContext) {
+        this.applicationContext = applicationContext;
+    }
+
+    @PostConstruct
+    public void init() {
+        applicationContext.getBeansWithAnnotation(RestController.class)
+            .forEach((name, bean) -> {
+                Class<?> clazz = bean.getClass();
+
+                // Nível de classe
+                if (clazz.isAnnotationPresent(MonitoredEndpoint.class)) {
+                    monitoredEndpoints.add(clazz.getSimpleName());
+                    monitoredClasses.put(clazz.getSimpleName(), clazz.getAnnotation(MonitoredEndpoint.class));
+                }
+
+                // Nível de método
+                for (Method method : clazz.getDeclaredMethods()) {
+                    if (method.isAnnotationPresent(MonitoredEndpoint.class)) {
+                        String key = clazz.getSimpleName() + METHOD_SEPARATOR + method.getName();
+                        monitoredMethods.put(key, method.getAnnotation(MonitoredEndpoint.class));
+                    }
+                }
+            });
+    }
+
+    public boolean isMonitored(String controllerName, String methodName) {
+        return monitoredEndpoints.contains(controllerName) || monitoredMethods.containsKey(controllerName + METHOD_SEPARATOR + methodName);
+    }
+
+    public Optional<MonitoredEndpoint> getAnnotation(String controllerName, String methodName) {
+        String methodKey = controllerName + METHOD_SEPARATOR + methodName;
+
+        if (monitoredMethods.containsKey(methodKey)) {
+            return Optional.of(monitoredMethods.get(methodKey));
+        }
+
+        if (monitoredClasses.containsKey(controllerName)) {
+            return Optional.of(monitoredClasses.get(controllerName));
+        }
+
+        return Optional.empty();
+    }
+}
+
+
+Por que usar Map<String, MonitoredEndpoint> para métodos e classes?
+Com isso, você consegue:
+
+Saber exatamente de onde a anotação veio (classe ou método).
+
+Ter acesso à configuração dos campos incluídos/excluídos diretamente pela annotation.
+
+
+ETAPA 4: Atualizar DashboardInterceptor
+📦 Pacote atual: com.seuprojeto.application.interceptor
+
+
+
+package com.seuprojeto.application.interceptor;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.seuprojeto.application.registry.MonitoredEndpointRegistry;
+import com.seuprojeto.domain.enums.AwsSqsQueueEnum;
+import com.seuprojeto.domain.model.DashboardData;
+import com.seuprojeto.domain.model.DashboardMessage;
+import com.seuprojeto.domain.port.MessagePublisherPort;
+import com.seuprojeto.infrastructure.annotations.MonitoredEndpoint;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.stereotype.Component;
+import org.springframework.web.method.HandlerMethod;
+import org.springframework.web.servlet.HandlerInterceptor;
+import org.springframework.web.util.ContentCachingRequestWrapper;
+import org.springframework.web.util.ContentCachingResponseWrapper;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.time.LocalDateTime;
+import java.util.*;
+
+@Component
+public class DashboardInterceptor implements HandlerInterceptor {
+
+    private final MessagePublisherPort messagePublisher;
+    private final MonitoredEndpointRegistry endpointRegistry;
+    private final ObjectMapper objectMapper;
+
+    public DashboardInterceptor(MessagePublisherPort messagePublisher, MonitoredEndpointRegistry endpointRegistry, ObjectMapper objectMapper) {
+        this.messagePublisher = messagePublisher;
+        this.endpointRegistry = endpointRegistry;
+        this.objectMapper = objectMapper;
+    }
+
+    @Override
+    public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) {
+        return true;
+    }
+
+    @Override
+    public void afterCompletion(HttpServletRequest request, HttpServletResponse response, Object handler, Exception ex) throws Exception {
+        if (!(handler instanceof HandlerMethod handlerMethod)) {
+            return;
+        }
+
+        String controllerName = handlerMethod.getBeanType().getSimpleName();
+        String methodName     = handlerMethod.getMethod().getName();
+
+        if (!endpointRegistry.isMonitored(controllerName, methodName)) {
+            return;
+        }
+
+        Map<String, String> headers = new HashMap<>();
+        Enumeration<String> headerNames = request.getHeaderNames();
+        while (headerNames.hasMoreElements()) {
+            String headerName = headerNames.nextElement();
+            headers.put(headerName, request.getHeader(headerName));
+        }
+
+        String requestBody = getRequestBody(request);
+        String responseBody = getResponseBody(response);
+
+        // Obtem anotação do método ou classe
+        MonitoredEndpoint annotation = handlerMethod.getMethodAnnotation(MonitoredEndpoint.class);
+        if (annotation == null) {
+            annotation = handlerMethod.getBeanType().getAnnotation(MonitoredEndpoint.class);
+        }
+
+        // Aplica filtros de campos, se definidos na anotação
+        if (annotation != null) {
+            if (annotation.includedRequestFields().length > 0) {
+                try {
+                    Map<String, Object> requestBodyMap = objectMapper.readValue(requestBody, Map.class);
+                    requestBody = objectMapper.writeValueAsString(filterFields(requestBodyMap, annotation.includedRequestFields()));
+                } catch (Exception e) {
+                    // Se erro, mantém body original
+                }
+            }
+
+            if (annotation.includedResponseFields().length > 0) {
+                try {
+                    Map<String, Object> responseBodyMap = objectMapper.readValue(responseBody, Map.class);
+                    responseBody = objectMapper.writeValueAsString(filterFields(responseBodyMap, annotation.includedResponseFields()));
+                } catch (Exception e) {
+                    // Se erro, mantém body original
+                }
+            }
+        }
+
+        DashboardData dashboardData = new DashboardData(
+                request.getRequestURI(),
+                LocalDateTime.now(),
+                headers,
+                requestBody,
+                responseBody
+        );
+
+        String payload = objectMapper.writeValueAsString(dashboardData);
+        System.out.println("Payload enviado ao dashboard: " + payload);
+
+        DashboardMessage message = DashboardMessage.fromDashboardData(dashboardData);
+        messagePublisher.publishToQueue(message, AwsSqsQueueEnum.METRICS_SQS_TAILOR);
+    }
+
+    private String getRequestBody(HttpServletRequest request) {
+        if (request instanceof ContentCachingRequestWrapper cachingRequest) {
+            byte[] content = cachingRequest.getContentAsByteArray();
+            return content.length > 0 ? new String(content, StandardCharsets.UTF_8) : "";
+        }
+        return "";
+    }
+
+    private String getResponseBody(HttpServletResponse response) throws IOException {
+        if (response instanceof ContentCachingResponseWrapper cachingResponse) {
+            byte[] content = cachingResponse.getContentAsByteArray();
+            String responseBody = content.length > 0 ? new String(content, StandardCharsets.UTF_8) : "";
+            cachingResponse.copyBodyToResponse();
+            return responseBody;
+        }
+        return "";
+    }
+
+    private Map<String, Object> filterFields(Map<String, Object> body, String[] includedFields) {
+        Map<String, Object> filtered = new HashMap<>();
+        for (String field : includedFields) {
+            if (body.containsKey(field)) {
+                filtered.put(field, body.get(field));
+            }
+        }
+        return filtered;
+    }
+}
+
+
+
+
+
+-------------- antes de alterar anotation para aceitar todos o campos
+
+
+
+package com.seuprojeto.application.interceptor;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.seuprojeto.domain.model.DashboardData;
+import com.seuprojeto.domain.model.DashboardMessage;
+import com.seuprojeto.application.annotation.MonitoredEndpoint;
+import com.seuprojeto.application.registry.MonitoredEndpointRegistry;
+import com.seuprojeto.domain.port.MessagePublisherPort;
+import com.seuprojeto.infrastructure.aws.enums.AwsSqsQueueEnum;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.stereotype.Component;
+import org.springframework.web.servlet.HandlerInterceptor;
+import org.springframework.web.method.HandlerMethod;
+import org.springframework.web.util.ContentCachingRequestWrapper;
+import org.springframework.web.util.ContentCachingResponseWrapper;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.time.LocalDateTime;
+import java.util.*;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+@Component
+public class DashboardInterceptor implements HandlerInterceptor {
+
+    private static final Logger log = LoggerFactory.getLogger(DashboardInterceptor.class);
+
+    private final MessagePublisherPort messagePublisher;
+    private final MonitoredEndpointRegistry endpointRegistry;
+    private final ObjectMapper objectMapper;
+
+    public DashboardInterceptor(MessagePublisherPort messagePublisher, MonitoredEndpointRegistry endpointRegistry, ObjectMapper objectMapper) {
+        this.messagePublisher = messagePublisher;
+        this.endpointRegistry = endpointRegistry;
+        this.objectMapper = objectMapper;
+    }
+
+    @Override
+    public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) {
+        return true;
+    }
+
+    @Override
+    public void afterCompletion(HttpServletRequest request, HttpServletResponse response, Object handler, Exception ex) throws Exception {
+        if (!(handler instanceof HandlerMethod handlerMethod)) {
+            return;
+        }
+
+        String controllerName = handlerMethod.getBeanType().getSimpleName();
+        String methodName     = handlerMethod.getMethod().getName();
+
+        if (!endpointRegistry.isMonitored(controllerName, methodName)) {
+            return;
+        }
+
+        Optional<MonitoredEndpoint> annotationOpt = endpointRegistry.getAnnotation(controllerName, methodName);
+
+        List<String> includedRequestFields  = annotationOpt.map(a -> Arrays.asList(a.includedRequestFields())).orElse(Collections.emptyList());
+        List<String> includedResponseFields = annotationOpt.map(a -> Arrays.asList(a.includedResponseFields())).orElse(Collections.emptyList());
+
+        String rawRequestBody  = getRequestBody(request);
+        String rawResponseBody = getResponseBody(response);
+
+        String filteredRequestBody  = filterJsonFields(rawRequestBody, includedRequestFields);
+        String filteredResponseBody = filterJsonFields(rawResponseBody, includedResponseFields);
+
+        Map<String, String> headers = extractHeaders(request);
+
+        DashboardData dashboardData = new DashboardData(
+                request.getRequestURI(),
+                LocalDateTime.now(),
+                headers,
+                filteredRequestBody,
+                filteredResponseBody
+        );
+
+        String payload = objectMapper.writeValueAsString(dashboardData);
+        log.info("payload enviado ao dashboard: {}", payload);
+
+        DashboardMessage message = DashboardMessage.fromDashboardData(dashboardData);
+        messagePublisher.publishToQueue(message, AwsSqsQueueEnum.METRICS_SQS_TAILOR);
+    }
+
+    private String getRequestBody(HttpServletRequest request) {
+        if (request instanceof ContentCachingRequestWrapper cachingRequest) {
+            byte[] content = cachingRequest.getContentAsByteArray();
+            return content.length > 0 ? new String(content, StandardCharsets.UTF_8) : "";
+        }
+        return "";
+    }
+
+    private String getResponseBody(HttpServletResponse response) throws IOException {
+        if (response instanceof ContentCachingResponseWrapper cachingResponse) {
+            byte[] content = cachingResponse.getContentAsByteArray();
+            String responseBody = content.length > 0 ? new String(content, StandardCharsets.UTF_8) : "";
+            cachingResponse.copyBodyToResponse(); // importantíssimo
+            return responseBody;
+        }
+        return "";
+    }
+
+    private Map<String, String> extractHeaders(HttpServletRequest request) {
+        Map<String, String> headers = new HashMap<>();
+        Enumeration<String> headerNames = request.getHeaderNames();
+        while (headerNames != null && headerNames.hasMoreElements()) {
+            String headerName = headerNames.nextElement();
+            headers.put(headerName, request.getHeader(headerName));
+        }
+        return headers;
+    }
+
+    private String filterJsonFields(String jsonBody, List<String> includedFields) {
+        if (includedFields.isEmpty() || jsonBody == null || jsonBody.isBlank()) {
+            return jsonBody;
+        }
+
+        try {
+            JsonNode rootNode = objectMapper.readTree(jsonBody);
+            ObjectNode filteredNode = objectMapper.createObjectNode();
+
+            for (String field : includedFields) {
+                if (rootNode.has(field)) {
+                    filteredNode.set(field, rootNode.get(field));
+                }
+            }
+
+            return objectMapper.writeValueAsString(filteredNode);
+        } catch (Exception e) {
+            log.warn("Erro ao filtrar campos do JSON: {}", e.getMessage());
+            return jsonBody;
+        }
+    }
+}
+
+
+Onde ficam essas classes?
+Classe	                   Pacote
+DashboardInterceptor	   com.seuprojeto.application.interceptor
+MonitoredEndpointRegistry  com.seuprojeto.application.registry
+MonitoredEndpoint	   com.seuprojeto.application.annotation
+
+
