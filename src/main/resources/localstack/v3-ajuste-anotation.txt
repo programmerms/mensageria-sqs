@@ -45,13 +45,6 @@ public @interface MonitoredEndpoint {
 
 package com.seupacote.filtro;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import lombok.RequiredArgsConstructor;
-import org.springframework.stereotype.Component;
-
-import java.util.*;
-
 @Component
 @RequiredArgsConstructor
 public class PayloadFilter {
@@ -68,37 +61,54 @@ public class PayloadFilter {
             Map<String, Object> result = new LinkedHashMap<>();
 
             for (String path : allowedFields) {
-                JsonNode currentNode = root;
-                String[] parts = path.split("\\.");
-
-                for (String part : parts) {
-                    if (currentNode != null) {
-                        currentNode = currentNode.get(part);
-                    } else {
-                        break;
-                    }
-                }
-
-                if (currentNode != null && !currentNode.isNull()) {
-                    insertNested(result, parts, objectMapper.treeToValue(currentNode, Object.class));
-                }
+                addFilteredField(result, root, path);
             }
 
             return result;
-
         } catch (Exception e) {
-            // log.error("Erro ao filtrar payload", e);
             return Collections.emptyMap();
         }
     }
 
+    private void addFilteredField(Map<String, Object> result, JsonNode currentNode, String path) {
+        String[] parts = path.split("\\.");
+        addRecursive(result, currentNode, parts, 0);
+    }
+
     @SuppressWarnings("unchecked")
-    private void insertNested(Map<String, Object> map, String[] path, Object value) {
-        Map<String, Object> current = map;
-        for (int i = 0; i < path.length - 1; i++) {
-            current = (Map<String, Object>) current.computeIfAbsent(path[i], k -> new LinkedHashMap<>());
+    private void addRecursive(Map<String, Object> result, JsonNode node, String[] path, int index) {
+        String key = path[index];
+        JsonNode child = node.get(key);
+
+        if (child == null || child.isNull()) return;
+
+        if (index == path.length - 1) {
+            // Último nível, adiciona valor simples
+            result.putIfAbsent(key, child.isValueNode() ? child.asText() : convertNode(child));
+        } else {
+            if (child.isArray()) {
+                // Se for array, aplica recursivamente em cada item
+                List<Object> filteredList = new ArrayList<>();
+                for (JsonNode item : child) {
+                    Map<String, Object> filteredItem = new LinkedHashMap<>();
+                    addRecursive(filteredItem, item, path, index + 1);
+                    filteredList.add(filteredItem);
+                }
+                result.putIfAbsent(key, filteredList);
+            } else if (child.isObject()) {
+                Map<String, Object> nested = (Map<String, Object>) result.getOrDefault(key, new LinkedHashMap<>());
+                addRecursive(nested, child, path, index + 1);
+                result.put(key, nested);
+            }
         }
-        current.put(path[path.length - 1], value);
+    }
+
+    private Object convertNode(JsonNode node) {
+        try {
+            return objectMapper.treeToValue(node, Object.class);
+        } catch (Exception e) {
+            return null;
+        }
     }
 }
 
