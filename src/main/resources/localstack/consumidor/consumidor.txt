@@ -1,0 +1,151 @@
+--------------------------------------------------------------------------------------------------------------------------------------------------------------
+Fala meu parceiro! Bom dia, tudo certo?
+
+Bora nessa missão sim, vai ser show automatizar esse processo. A ideia que você trouxe faz total sentido — vamos estruturar de forma que o consumidor consiga:
+
+1 - Identificar o tipo do request e response recebidos na mensagem.
+
+2 - Mapear para as classes corretas do lado do consumidor.
+
+3 - Processar de forma genérica e extensível, preparada para crescer.
+-----------------------------------------------------------------------
+🔧 Nossa estratégia
+A gente pode seguir essa arquitetura:
+
+1 - Enum DashboardEventType: associa o endpoint ou operação com suas classes de request e response.
+
+2 - Strategy DashboardEventHandler: interface que cada implementação conhece como processar seu par request/response.
+
+3 - Dispatcher DashboardMessageProcessor: ao receber uma mensagem, identifica qual handler deve ser usado com base no tipo e dispara o processamento.
+
+4 - SQS Listener DashboardConsumer: ouve a fila e dispara o DashboardMessageProcessor.
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Vamos fazer assim:
+1 - Começar criando o DashboardEventType, com endpoint + request + response.
+
+2 - Criar a interface DashboardEventHandler<RQ, RS> com método handle(RQ request, RS response).
+
+3 - Implementar um exemplo concreto de handler (UserCreatedEventHandler, por exemplo).
+
+4-  Criar o DashboardMessageProcessor que lê a mensagem genérica e resolve para o handler correto.
+
+5- Criar o DashboardConsumer com o @SqsListener.
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+1 - Enum DashboardEventType: associa o endpoint ou operação com suas classes de request e response.
+
+// pacote: com.seuprojeto.consumer.routing
+
+@Getter
+@RequiredArgsConstructor
+public enum EndpointHandlerType {
+    DASHBOARD_METRICS("metrics/dashboard", DashboardRequest.class, DashboardResponse.class);
+
+    private final String endpoint;
+    private final Class<?> requestClass;
+    private final Class<?> responseClass;
+
+    public static Optional<EndpointHandlerType> fromEndpoint(String endpoint) {
+        return Arrays.stream(values())
+                     .filter(e -> e.getEndpoint().equals(endpoint))
+                     .findFirst();
+    }
+}
+
+2 - Criar a interface DashboardEventHandler<RQ, RS> com método handle(RQ request, RS response).
+
+// pacote: com.seuprojeto.consumer.handler
+
+public interface EndpointMessageHandler<T, R> {
+    void handle(T request, R response);
+}
+
+3 - Implementar um exemplo concreto de handler (UserCreatedEventHandler, por exemplo).
+// pacote: com.seuprojeto.consumer.handler.impl
+
+@Component
+public class DashboardMetricsHandler implements EndpointMessageHandler<DashboardRequest, DashboardResponse> {
+
+    @Override
+    public void handle(DashboardRequest request, DashboardResponse response) {
+        // lógica de negócio para lidar com os dados
+        System.out.println("Handling dashboard request/response");
+    }
+}
+
+4-  Criar o DashboardMessageProcessor que lê a mensagem genérica e resolve para o handler correto.
+Registry dos Handlers
+
+// pacote: com.seuprojeto.consumer.handler
+
+@Component
+@RequiredArgsConstructor
+public class EndpointHandlerRegistry {
+
+    private final List<EndpointMessageHandler<?, ?>> handlers;
+    private final Map<EndpointHandlerType, EndpointMessageHandler<?, ?>> handlerMap = new HashMap<>();
+
+    @PostConstruct
+    public void init() {
+        handlerMap.put(EndpointHandlerType.DASHBOARD_METRICS, findHandler(DashboardMetricsHandler.class));
+        // adicionar outros handlers aqui se necessário
+    }
+
+    private <T extends EndpointMessageHandler<?, ?>> T findHandler(Class<T> clazz) {
+        return handlers.stream()
+                .filter(clazz::isInstance)
+                .map(clazz::cast)
+                .findFirst()
+                .orElseThrow(() -> new IllegalStateException("Handler não encontrado: " + clazz));
+    }
+
+    public EndpointMessageHandler<?, ?> getHandler(EndpointHandlerType type) {
+        return handlerMap.get(type);
+    }
+}
+
+5 - Consumer Listener SQS
+
+// pacote: com.seuprojeto.consumer.listener
+
+@Component
+@RequiredArgsConstructor
+public class SqsConsumerListener {
+
+    private final ObjectMapper objectMapper;
+    private final EndpointHandlerRegistry handlerRegistry;
+
+    @SqsListener("metricas-tailor") // nome da fila
+    public void consume(String messageJson) {
+        try {
+            JsonNode json = objectMapper.readTree(messageJson);
+            String endpoint = json.get("endpoint").asText(); // você já envia isso no producer
+
+            EndpointHandlerType.fromEndpoint(endpoint).ifPresentOrElse(type -> {
+                try {
+                    Class<?> reqClass = type.getRequestClass();
+                    Class<?> resClass = type.getResponseClass();
+
+                    Object request  = objectMapper.treeToValue(json.get("request"), reqClass);
+                    Object response = objectMapper.treeToValue(json.get("response"), resClass);
+
+                    @SuppressWarnings("unchecked")
+                    EndpointMessageHandler<Object, Object> handler = (EndpointMessageHandler<Object, Object>) handlerRegistry.getHandler(type);
+                    handler.handle(request, response);
+
+                } catch (Exception e) {
+                    throw new RuntimeException("Erro ao processar a mensagem", e);
+                }
+            }, () -> {
+                throw new IllegalStateException("Endpoint não mapeado: " + endpoint);
+            });
+
+        } catch (Exception e) {
+            e.printStackTrace(); // logar melhor no mundo real
+        }
+    }
+}
+
+6 -

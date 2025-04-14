@@ -1,0 +1,222 @@
+Teste Unitário – DashboardInterceptorTest
+
+package com.seuprojeto.application.interceptor;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.seuprojeto.application.registry.MonitoredEndpointRegistry;
+import com.seuprojeto.domain.model.DashboardMessage;
+import com.seuprojeto.domain.port.MessagePublisherPort;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.*;
+import org.springframework.web.method.HandlerMethod;
+import org.springframework.web.util.ContentCachingRequestWrapper;
+import org.springframework.web.util.ContentCachingResponseWrapper;
+
+import java.io.PrintWriter;
+import java.io.StringWriter;
+import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
+import java.util.Collections;
+import java.util.Enumeration;
+import java.util.Vector;
+
+import static org.mockito.Mockito.*;
+
+class DashboardInterceptorTest {
+
+    @InjectMocks
+    private DashboardInterceptor interceptor;
+
+    @Mock
+    private MessagePublisherPort messagePublisher;
+
+    @Mock
+    private MonitoredEndpointRegistry registry;
+
+    @Mock
+    private ObjectMapper objectMapper;
+
+    @Mock
+    private HttpServletRequest request;
+
+    @Mock
+    private HttpServletResponse response;
+
+    @Mock
+    private HandlerMethod handlerMethod;
+
+    @BeforeEach
+    void setUp() {
+        MockitoAnnotations.openMocks(this);
+    }
+
+    @Test
+    void shouldNotPublishWhenEndpointIsNotMonitored() throws Exception {
+        when(handlerMethod.getBeanType()).thenReturn(DummyController.class);
+        when(handlerMethod.getMethod()).thenReturn(DummyController.class.getDeclaredMethod("test"));
+
+        when(registry.isMonitored("DummyController", "test")).thenReturn(false);
+
+        interceptor.afterCompletion(request, response, handlerMethod, null);
+
+        verify(messagePublisher, never()).publish(any());
+    }
+
+    static class DummyController {
+        public void test() {}
+    }
+}
+
+
+2 - Teste Unitário – SqsPublisherAdapterTest
+
+package com.seuprojeto.infra.sqs;
+
+import com.seuprojeto.domain.enums.AwsSqsQueue;
+import com.seuprojeto.domain.model.DashboardMessage;
+import com.seuprojeto.infra.config.AwsProperties;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import software.amazon.awssdk.services.sqs.SqsClient;
+import software.amazon.awssdk.services.sqs.model.GetQueueUrlRequest;
+import software.amazon.awssdk.services.sqs.model.GetQueueUrlResponse;
+import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
+
+import java.util.Map;
+
+import static org.mockito.Mockito.*;
+
+class SqsPublisherAdapterTest {
+
+    private SqsClient sqsClient;
+    private AwsProperties awsProperties;
+    private SqsPublisherAdapter adapter;
+
+    @BeforeEach
+    void setUp() {
+        sqsClient = mock(SqsClient.class);
+        awsProperties = new AwsProperties();
+        awsProperties.setAwsQueues(Map.of("metrics-sqs-tailor", "fila-teste"));
+
+        adapter = new SqsPublisherAdapter(sqsClient, awsProperties);
+    }
+
+    @Test
+    void shouldSendMessageToSqs() {
+        // Arrange
+        DashboardMessage message = new DashboardMessage("dummy");
+        AwsSqsQueue queue = AwsSqsQueue.METRICS_SQS_TAILOR;
+
+        when(sqsClient.getQueueUrl(any(GetQueueUrlRequest.class)))
+            .thenReturn(GetQueueUrlResponse.builder().queueUrl("https://sqs-url").build());
+
+        // Act
+        adapter.publishToQueue(message, queue);
+
+        // Assert
+        verify(sqsClient).sendMessage(argThat((SendMessageRequest req) ->
+            req.queueUrl().equals("https://sqs-url") &&
+            req.messageBody().contains("dummy")));
+    }
+}
+
+3 - Teste Unitário – Cenário completo DashboardInterceptor com mock de request/response
+
+@Test
+void shouldPublishMessageWhenMonitored() throws Exception {
+    // Mocks
+    ContentCachingRequestWrapper cachingRequest = mock(ContentCachingRequestWrapper.class);
+    ContentCachingResponseWrapper cachingResponse = mock(ContentCachingResponseWrapper.class);
+    String reqBody = "{\"foo\":\"bar\"}";
+    String resBody = "{\"result\":\"ok\"}";
+
+    when(cachingRequest.getContentAsByteArray()).thenReturn(reqBody.getBytes(StandardCharsets.UTF_8));
+    when(cachingResponse.getContentAsByteArray()).thenReturn(resBody.getBytes(StandardCharsets.UTF_8));
+
+    Enumeration<String> headers = new Vector<>(Collections.singletonList("x-header")).elements();
+    when(cachingRequest.getHeaderNames()).thenReturn(headers);
+    when(cachingRequest.getHeader("x-header")).thenReturn("123");
+
+    when(handlerMethod.getBeanType()).thenReturn(DummyController.class);
+    when(handlerMethod.getMethod()).thenReturn(DummyController.class.getDeclaredMethod("test"));
+
+    when(registry.isMonitored("DummyController", "test")).thenReturn(true);
+    when(objectMapper.writeValueAsString(any())).thenReturn("json-payload");
+
+    interceptor.afterCompletion(cachingRequest, cachingResponse, handlerMethod, null);
+
+    verify(messagePublisher).publishToQueue(any(DashboardMessage.class), eq(AwsSqsQueue.METRICS_SQS_TAILOR));
+}
+
+4 - Teste Unitário – MonitoredEndpointRegistryTest
+
+package com.seuprojeto.application.registry;
+
+import com.seuprojeto.application.annotation.MonitoredEndpoint;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.context.ApplicationContext;
+import org.springframework.web.bind.annotation.RestController;
+
+import java.lang.reflect.Method;
+import java.util.Map;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+
+class MonitoredEndpointRegistryTest {
+
+    private ApplicationContext context;
+    private MonitoredEndpointRegistry registry;
+
+    @BeforeEach
+    void setup() {
+        context = mock(ApplicationContext.class);
+        registry = new MonitoredEndpointRegistry(context);
+    }
+
+    @Test
+    void shouldRegisterAnnotatedControllerClass() {
+        Object bean = new TestController();
+        when(context.getBeansWithAnnotation(RestController.class))
+                .thenReturn(Map.of("testController", bean));
+
+        registry.init();
+
+        assertTrue(registry.isMonitored("TestController", "anyMethod"));
+    }
+
+    @Test
+    void shouldRegisterAnnotatedControllerMethod() throws NoSuchMethodException {
+        Object bean = new MethodLevelController();
+        when(context.getBeansWithAnnotation(RestController.class))
+                .thenReturn(Map.of("methodController", bean));
+
+        registry.init();
+
+        assertTrue(registry.isMonitored("MethodLevelController", "monitoredMethod"));
+    }
+
+    // Mock controller classes
+
+    @RestController
+    @MonitoredEndpoint
+    static class TestController {
+        public void someMethod() {}
+    }
+
+    @RestController
+    static class MethodLevelController {
+
+        @MonitoredEndpoint
+        public void monitoredMethod() {}
+
+        public void nonMonitoredMethod() {}
+    }
+}
+
+5 -
+

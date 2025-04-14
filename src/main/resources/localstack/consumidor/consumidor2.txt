@@ -1,0 +1,212 @@
+
+1 EndpointHandlerType (Enum): Mapeia o endpoint para a classe de request/response.
+
+2 EndpointMessageHandler (Interface): Contrato para os handlers.
+
+3 DashboardMetricsHandler: Implementação para o endpoint metrics/dashboard.
+
+4 EndpointHandlerRegistry: Registra os handlers e os resolve pelo enum.
+
+5 SqsConsumerListener: Faz o parsing da mensagem do SQS, resolve e executa o handler correto.
+
+
+
+// pacote: com.seuprojeto.consumer.routing
+
+package com.seuprojeto.consumer.routing;
+
+import com.seuprojeto.dto.DashboardRequest;
+import com.seuprojeto.dto.DashboardResponse;
+import lombok.Getter;
+import lombok.RequiredArgsConstructor;
+
+import java.util.Arrays;
+import java.util.Optional;
+
+@Getter
+@RequiredArgsConstructor
+public enum EndpointHandlerType {
+    DASHBOARD_METRICS("metrics/dashboard", DashboardRequest.class, DashboardResponse.class);
+
+    private final String endpoint;
+    private final Class<?> requestClass;
+    private final Class<?> responseClass;
+
+    public static Optional<EndpointHandlerType> fromEndpoint(String endpoint) {
+        return Arrays.stream(values())
+                .filter(e -> e.getEndpoint().equals(endpoint))
+                .findFirst();
+    }
+}
+
+// pacote: com.seuprojeto.consumer.handler
+
+package com.seuprojeto.consumer.handler;
+
+public interface EndpointMessageHandler<T, R> {
+    void handle(T request, R response);
+}
+
+// pacote: com.seuprojeto.consumer.handler.impl
+
+package com.seuprojeto.consumer.handler.impl;
+
+import com.seuprojeto.consumer.handler.EndpointMessageHandler;
+import com.seuprojeto.dto.DashboardRequest;
+import com.seuprojeto.dto.DashboardResponse;
+import org.springframework.stereotype.Component;
+
+@Component
+public class DashboardMetricsHandler implements EndpointMessageHandler<DashboardRequest, DashboardResponse> {
+
+    @Override
+    public void handle(DashboardRequest request, DashboardResponse response) {
+        System.out.println("Handling dashboard request/response");
+        // lógica de processamento real
+    }
+}
+
+// pacote: com.seuprojeto.consumer.handler
+
+package com.seuprojeto.consumer.handler;
+
+import com.seuprojeto.consumer.handler.impl.DashboardMetricsHandler;
+import com.seuprojeto.consumer.routing.EndpointHandlerType;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Component;
+
+import jakarta.annotation.PostConstruct;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+@Component
+@RequiredArgsConstructor
+public class EndpointHandlerRegistry {
+
+    private final List<EndpointMessageHandler<?, ?>> handlers;
+    private final Map<EndpointHandlerType, EndpointMessageHandler<?, ?>> handlerMap = new HashMap<>();
+
+    @PostConstruct
+    public void init() {
+        handlerMap.put(EndpointHandlerType.DASHBOARD_METRICS, findHandler(DashboardMetricsHandler.class));
+    }
+
+    private <T extends EndpointMessageHandler<?, ?>> T findHandler(Class<T> clazz) {
+        return handlers.stream()
+                .filter(clazz::isInstance)
+                .map(clazz::cast)
+                .findFirst()
+                .orElseThrow(() -> new IllegalStateException("Handler não encontrado: " + clazz));
+    }
+
+    public EndpointMessageHandler<?, ?> getHandler(EndpointHandlerType type) {
+        return handlerMap.get(type);
+    }
+}
+
+// pacote: com.seuprojeto.consumer.listener
+
+package com.seuprojeto.consumer.listener;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.seuprojeto.consumer.handler.EndpointHandlerRegistry;
+import com.seuprojeto.consumer.handler.EndpointMessageHandler;
+import com.seuprojeto.consumer.routing.EndpointHandlerType;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Component;
+import org.springframework.messaging.handler.annotation.Payload;
+import io.awspring.cloud.sqs.annotation.SqsListener;
+
+@Component
+@RequiredArgsConstructor
+public class SqsConsumerListener {
+
+    private final ObjectMapper objectMapper;
+    private final EndpointHandlerRegistry handlerRegistry;
+
+    @SqsListener("metricas-tailor")
+    public void consume(@Payload String messageJson) {
+        try {
+            JsonNode json = objectMapper.readTree(messageJson);
+            String endpoint = json.get("endpoint").asText();
+
+            EndpointHandlerType.fromEndpoint(endpoint).ifPresentOrElse(type -> {
+                try {
+                    Object request  = objectMapper.treeToValue(json.get("request"), type.getRequestClass());
+                    Object response = objectMapper.treeToValue(json.get("response"), type.getResponseClass());
+
+                    @SuppressWarnings("unchecked")
+                    EndpointMessageHandler<Object, Object> handler =
+                            (EndpointMessageHandler<Object, Object>) handlerRegistry.getHandler(type);
+
+                    handler.handle(request, response);
+                } catch (Exception e) {
+                    throw new RuntimeException("Erro ao mapear request/response", e);
+                }
+            }, () -> {
+                throw new IllegalStateException("Endpoint não mapeado: " + endpoint);
+            });
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+}
+
+
+** explicação **
+
+Contexto do que chega pelo SQS:
+
+uri (ex: /api/metrics/dashboard)
+
+requestBody (String JSON)
+
+responseBody (String JSON)
+
+headers, timestamp, etc.
+
+Objetivo:
+No consumidor, queremos:
+
+1 - Identificar qual handler deve ser chamado com base no uri.
+
+2 - Esse handler saberá:
+
+     Qual classe deve ser usada para desserializar o requestBody.
+
+      Qual classe deve ser usada para desserializar o responseBody.
+
+Onde entra a inteligência (Strategy + Enum):
+1. Enum EndpointHandlerType:
+Esse enum mapeia o uri para:
+  O nome do handler responsável.
+  A classe de request.
+  A classe de response.
+Exemplo:
+METRICS_DASHBOARD("/api/metrics/dashboard", MetricsDashboardRequest.class, MetricsDashboardResponse.class);
+
+2. Classe EndpointHandlerRegistry:
+Quando o SqsConsumerListener recebe uma mensagem, ele:
+  Lê o uri do DashboardData.
+  Usa o EndpointHandlerType.fromUri(uri) para achar o tipo correto.
+  Com isso, ele sabe:
+      Qual handler deve usar (DashboardMetricsHandler, por exemplo).
+      Qual classe deve usar para deserializar o request/response JSON.
+
+3. Handler (DashboardMetricsHandler):
+O handler recebe já os objetos do tipo certo:
+
+public void handle(Object rawRequest, Object rawResponse) {
+   MetricsDashboardRequest request = (MetricsDashboardRequest) rawRequest;
+   MetricsDashboardResponse response = (MetricsDashboardResponse) rawResponse;
+}
+
+Fluxo Completo:
+1 - Mensagem chega → SqsConsumerListener
+2 - Extrai uri → /api/metrics/dashboard
+3 - Busca no EndpointHandlerType → pega classes e handler
+4 - Desserializa request e response usando ObjectMapper.readValue
+5 - Executa o handler → ele trabalha com os objetos do tipo certo
+
