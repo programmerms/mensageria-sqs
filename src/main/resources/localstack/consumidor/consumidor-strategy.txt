@@ -1,0 +1,94 @@
+// Pacote: com.seuprojeto.consumer.strategy
+
+public interface ProcessMessageDashBoard {
+    String getUrl();
+    void process(Object request, Object response, Map<String, String> headers);
+}
+
+// Pacote: com.seuprojeto.consumer.strategy.impl
+
+@Component
+public class DashboardMetricsMessageProcessor implements ProcessMessageDashBoard {
+
+    @Override
+    public String getUrl() {
+        return "metrics/dashboard";
+    }
+
+    @Override
+    public void process(Object request, Object response, Map<String, String> headers) {
+        DashboardRequest req = (DashboardRequest) request;
+        DashboardResponse res = (DashboardResponse) response;
+        // Aqui você implementa a lógica do que fazer com os dados
+        System.out.println("[Dashboard] Requisição: " + req);
+        System.out.println("[Dashboard] Resposta: " + res);
+    }
+}
+
+// Pacote: com.seuprojeto.consumer.factory
+
+@Component
+@RequiredArgsConstructor
+public class ProcessMessageDashBoardFactory {
+
+    private final List<ProcessMessageDashBoard> processors;
+
+    public ProcessMessageDashBoard getByEndpoint(String endpoint) {
+        return processors.stream()
+                .filter(p -> p.getUrl().equalsIgnoreCase(endpoint))
+                .findFirst()
+                .orElseThrow(() -> new IllegalArgumentException("No processor found for endpoint: " + endpoint));
+    }
+}
+
+// Pacote: com.seuprojeto.consumer.listener
+
+@Component
+@RequiredArgsConstructor
+public class SqsConsumerListener {
+
+    private final ObjectMapper objectMapper;
+    private final ProcessMessageDashBoardFactory factory;
+
+    @SqsListener("metricas-tailor")
+    public void consume(String messageJson) {
+        try {
+            JsonNode root = objectMapper.readTree(messageJson);
+            String endpoint = root.get("endpoint").asText();
+            JsonNode requestNode = root.get("request");
+            JsonNode responseNode = root.get("response");
+
+            // Você pode adaptar para refletir o tipo correto com base no endpoint se necessário
+            Object request = objectMapper.treeToValue(requestNode, Object.class);
+            Object response = objectMapper.treeToValue(responseNode, Object.class);
+
+            Map<String, String> headers = new HashMap<>();
+            JsonNode headersNode = root.get("headers");
+            if (headersNode != null && headersNode.isObject()) {
+                headersNode.fields().forEachRemaining(entry -> headers.put(entry.getKey(), entry.getValue().asText()));
+            }
+
+            ProcessMessageDashBoard processor = factory.getByEndpoint(endpoint);
+            processor.process(request, response, headers);
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+}
+
+// 🧪 Exemplo de mensagem enviada pelo produtor que será processada corretamente:
+/*
+{
+  "endpoint": "metrics/dashboard",
+  "request": {
+    "filter": "today"
+  },
+  "response": {
+    "count": 42
+  },
+  "headers": {
+    "X-Correlation-ID": "abc-123"
+  }
+}
+*/
