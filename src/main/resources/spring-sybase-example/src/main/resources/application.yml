@@ -1,0 +1,12 @@
+ir3:
+  datasource:
+    sybase:
+      dbnwrk10:
+        driver-classname: com.sybase.jdbc4.jdbc.SybDriver
+        url: jdbc:sybase:Tds:localhost:5000/SEUBANCO
+        username: seu_usuario
+        password: sua_senha
+
+spring:
+  datasource:
+    initialization-mode: never
