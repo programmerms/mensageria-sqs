@@ -1,0 +1,51 @@
+package com.seuprojeto.testconfig;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.seuprojeto.application.interceptor.DashboardInterceptor;
+import com.seuprojeto.application.registry.MonitoredEndpointRegistry;
+import com.seuprojeto.domain.port.MessagePublisherPort;
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration
+public class TestWebConfig {
+
+    @Bean
+    public DashboardInterceptor dashboardInterceptor(
+            MessagePublisherPort publisher,
+            MonitoredEndpointRegistry registry,
+            ObjectMapper mapper
+    ) {
+        return new DashboardInterceptor(publisher, registry, mapper);
+    }
+
+    @Bean
+    public MonitoredEndpointRegistry monitoredEndpointRegistry(ApplicationContext applicationContext) {
+        return new MonitoredEndpointRegistry(applicationContext);
+    }
+}
+
+
+package com.seuprojeto.controller;
+
+import com.seuprojeto.testconfig.TestWebConfig;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
+import org.springframework.context.annotation.Import;
+import org.springframework.test.web.servlet.MockMvc;
+
+@WebMvcTest(SuaClasseController.class)
+@Import(TestWebConfig.class)
+class SuaClasseControllerTest {
+
+    @Autowired
+    private MockMvc mockMvc;
+
+    @Test
+    void deveRetornar200() throws Exception {
+        mockMvc.perform(get("/sua-url"))
+                .andExpect(status().isOk());
+    }
+}
