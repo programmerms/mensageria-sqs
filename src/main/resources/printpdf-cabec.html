@@ -1,12 +1,12 @@
 <!DOCTYPE html>
 <html lang="pt-br">
 <head>
-    <meta charset="UTF-8">
-    <title>Modelo PDF com Cabeçalho e Rodapé</title>
+    <meta charset="UTF-8" />
+    <title>Modelo PDF com Cabeçalho e Rodapé Ajustados</title>
     <style>
         @page {
             size: A4;
-            margin: 100px 40px 80px 40px;
+            margin: 130px 40px 80px 40px; /* margem topo aumentada */
             @top-center {
                 content: element(header);
             }
@@ -31,7 +31,7 @@
             justify-content: space-between;
             align-items: center;
             border: 2px solid #000;
-            padding: 10px 15px;
+            padding: 20px 15px 10px 15px; /* padding-top aumentado */
             font-size: 14px;
         }
 
@@ -41,8 +41,8 @@
         }
 
         .coluna-imagem img {
-            max-height: 50px;
-            max-width: 100px;
+            max-height: 30px;  /* imagem menor */
+            max-width: 60px;
         }
 
         /* Rodapé */
@@ -79,7 +79,6 @@
             text-align: justify;
             line-height: 1.6;
         }
-
     </style>
 </head>
 <body>
@@ -92,7 +91,7 @@
             <div>Linha 2 do cabeçalho</div>
         </div>
         <div class="coluna-imagem">
-            <img src="logo.png" alt="Logo da empresa">
+            <img src="logo.png" alt="Logo da empresa" />
         </div>
     </div>
 </header>
@@ -110,11 +109,13 @@
         <h1>Relatório</h1>
         <p>
             Lorem ipsum dolor sit amet, consectetur adipiscing elit. Praesent varius, orci eu posuere blandit, orci nisl hendrerit nulla, eget laoreet velit sem nec magna.
-            <!-- Repita esse parágrafo para gerar quebra automática -->
+        </p>
+        <p>
+            <!-- repita para gerar quebra automática -->
+            Lorem ipsum dolor sit amet, consectetur adipiscing elit. Praesent varius, orci eu posuere blandit, orci nisl hendrerit nulla, eget laoreet velit sem nec magna.
         </p>
     </div>
 
-    <!-- Força uma nova página -->
     <div class="page-break"></div>
 
     <div class="section">
@@ -124,6 +125,5 @@
         </p>
     </div>
 </main>
-
 </body>
 </html>
