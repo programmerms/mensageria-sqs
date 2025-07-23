@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <title>Modelo PDF com Cabeçalho e Rodapé</title>
+    <style>
+        @page {
+            size: A4;
+            margin: 100px 40px 80px 40px; /* top, right, bottom, left */
+        }
+
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+        }
+
+        header {
+            position: running(header);
+        }
+
+        footer {
+            position: running(footer);
+        }
+
+        .content {
+            margin: 0;
+            padding: 0;
+        }
+
+        .section {
+            margin-bottom: 20px;
+        }
+
+        h1, h2 {
+            margin: 0;
+            padding: 0;
+        }
+
+        p {
+            text-align: justify;
+            line-height: 1.6;
+        }
+
+        /* Para ferramentas que suportam CSS Paged Media como WeasyPrint ou Prince */
+        @page {
+            @top-center {
+                content: element(header);
+            }
+
+            @bottom-center {
+                content: element(footer);
+            }
+        }
+    </style>
+</head>
+<body>
+
+<header>
+    <div style="text-align: center; font-size: 14px; border-bottom: 1px solid #ccc; padding-bottom: 10px;">
+        <strong>Cabeçalho Oficial do Documento</strong><br>
+        Empresa XYZ · Relatório Técnico
+    </div>
+</header>
+
+<footer>
+    <div style="text-align: center; font-size: 12px; border-top: 1px solid #ccc; padding-top: 10px;">
+        Documento confidencial · Página <span class="pageNumber"></span> de <span class="totalPages"></span>
+    </div>
+</footer>
+
+<main class="content">
+    <div class="section">
+        <h1>Relatório Técnico</h1>
+        <p>
+            <!-- conteúdo de teste com múltiplas páginas -->
+            Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed eget libero eu justo malesuada fermentum...
+            (repita este parágrafo várias vezes para testar a quebra de página)
+        </p>
+    </div>
+
+    <div class="section">
+        <h2>Conclusão</h2>
+        <p>
+            Esta seção também respeitará o cabeçalho e rodapé, independentemente do número de páginas.
+        </p>
+    </div>
+</main>
+
+</body>
+</html>
