@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <title>Modelo PDF com Cabeçalho e Rodapé</title>
+    <style>
+        @page {
+            size: A4;
+            margin: 100px 40px 80px 40px;
+            @top-center {
+                content: element(header);
+            }
+            @bottom-center {
+                content: element(footer);
+            }
+        }
+
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+        }
+
+        /* Cabeçalho */
+        header {
+            position: running(header);
+        }
+
+        .header-content {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border: 2px solid #000;
+            padding: 10px 15px;
+            font-size: 14px;
+        }
+
+        .coluna-texto {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .coluna-imagem img {
+            max-height: 50px;
+            max-width: 100px;
+        }
+
+        /* Rodapé */
+        footer {
+            position: running(footer);
+        }
+
+        .footer-content {
+            font-size: 12px;
+            text-align: center;
+            padding: 5px 0;
+            border-top: 2px solid #000;
+            border-bottom: 2px solid #000;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        /* Conteúdo principal */
+        main {
+            margin: 0;
+            padding: 0;
+        }
+
+        .section {
+            margin-bottom: 20px;
+        }
+
+        .page-break {
+            page-break-before: always;
+        }
+
+        p {
+            text-align: justify;
+            line-height: 1.6;
+        }
+
+    </style>
+</head>
+<body>
+
+<!-- Cabeçalho -->
+<header>
+    <div class="header-content">
+        <div class="coluna-texto">
+            <div>Linha 1 do cabeçalho</div>
+            <div>Linha 2 do cabeçalho</div>
+        </div>
+        <div class="coluna-imagem">
+            <img src="logo.png" alt="Logo da empresa">
+        </div>
+    </div>
+</header>
+
+<!-- Rodapé -->
+<footer>
+    <div class="footer-content">
+        Documento confidencial · Página <span class="pageNumber"></span> de <span class="totalPages"></span>
+    </div>
+</footer>
+
+<!-- Conteúdo principal -->
+<main>
+    <div class="section">
+        <h1>Relatório</h1>
+        <p>
+            Lorem ipsum dolor sit amet, consectetur adipiscing elit. Praesent varius, orci eu posuere blandit, orci nisl hendrerit nulla, eget laoreet velit sem nec magna.
+            <!-- Repita esse parágrafo para gerar quebra automática -->
+        </p>
+    </div>
+
+    <!-- Força uma nova página -->
+    <div class="page-break"></div>
+
+    <div class="section">
+        <h2>Nova Seção</h2>
+        <p>
+            Esta seção começa em nova página e respeita o cabeçalho e rodapé.
+        </p>
+    </div>
+</main>
+
+</body>
+</html>
